@@ -1,0 +1,301 @@
+<?php
+// $Id: filefield_private.module,v 1.5 2010/02/08 13:32:31 dagmar Exp $
+
+/**
+ * Implementation of hook_widget_settings_alter().
+ */
+function filefield_private_field_settings_alter(&$settings, $op, $field) {
+  // Only support modules that implement hook_filefield_private_file_widgets().
+  $field_type = isset($field['widget_type']) ? $field['widget_type'] : $field['type'];
+  if (!in_array($field_type, filefield_private_file_fields())) {
+    return;
+  }
+
+  // Add our new options to the list of settings to be saved.
+  if ($op == 'save') {
+    $settings = array_merge($settings, array('filefield_private_downloads', 'filefield_private_content_disposition'));
+  }
+
+  // Add the additional settings to the form.
+  if ($op == 'form') {
+    $settings['filefield_private_downloads'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Private downloads'),
+      '#default_value' => (bool) $field['filefield_private_downloads'],
+      '#description' => t('Enables private downloads.'),
+    );
+    $content_disposition = empty($field['filefield_private_content_disposition'])
+        ? 'attachment' : $field['filefield_private_content_disposition'];
+    $settings['filefield_private_content_disposition'] = array(
+      '#type' => 'radios',
+      '#options' => array('attachment' => t('attachment'),'inline' => t('inline')),
+      '#title' => t('Private downloads content disposition'),
+      '#default_value' => $content_disposition,
+      '#description' => t('Try to force downloads to be rendered by the browser (inline) or downloaded (attachment).'),
+    );
+  }
+}
+
+function filefield_private_file_widgets($reset = FALSE) {
+  static $widgets;
+  if (!isset($widgets) || $reset) {
+    $widgets = module_invoke_all('filefield_private_file_widgets');
+  }
+  return $widgets;
+}
+
+/**
+ * Implementation of hook_filefield_private_file_widgets().
+ */
+function filefield_private_filefield_private_file_widgets() {
+  return array(
+    'filefield_widget', 'imagefield_widget',
+  );
+}
+
+
+function filefield_private_file_fields($reset = FALSE) {
+  static $fields;
+  if (!isset($fields) || $reset) {
+    $fields = module_invoke_all('filefield_private_file_fields');
+  }
+  return $fields;
+}
+
+/**
+ * Implementation of hook_filefield_private_file_fields().
+ */
+function filefield_private_filefield_private_file_fields() {
+  return array(
+    'filefield',
+  );
+}
+
+/**
+* Implementation of hook_theme().
+*/
+function filefield_private_theme($existing, $type, $theme, $path) {
+  return array(
+    'filefield_private_file' => array('arguments' => array('element' => NULL))
+  );
+}
+
+/**
+* Theme function for overriden field formatter theme callback.
+ */
+function theme_filefield_private_file($element) {
+  global $conf;
+  $system_directory_path = $conf['file_directory_path'];
+  $system_file_downloads = $conf['file_downloads'];
+  $filefield_private_directory_path = variable_get('filefield_private_directory_path', $system_directory_path);
+  $filefield_private_file_downloads = FILE_DOWNLOADS_PRIVATE;
+
+  $conf['file_directory_path'] = $filefield_private_directory_path;
+  $conf['file_downloads'] = $filefield_private_file_downloads;
+
+  if (isset($element['#old-theme']) && isset($element['#old-formatter'])) {
+    $element['#theme'] = $element['#old-theme'];
+    $element['#formatter'] = $element['#old-formatter'];
+  }
+  // Stop recursion
+  if ($element['#formatter'] == 'private_file_download') {
+    $element['#formatter'] = 'default';
+    $element['#theme'] = 'filefield_formatter_default';
+  }
+  $output = theme($element['#theme'], $element);
+  if (preg_match_all('/(href|src)="([^"]*)'. preg_quote(basename($element['#item']['filepath'])) .'"/', $output, $matches)) {
+    foreach ($matches[0] as $index => $link) {
+      $private_link = $matches[1][$index] .'="'. url('filefield-private/files/'.
+          $element['#node']->nid .'/'.
+          $element['#field_name'] .'/'.
+          $element['#item']['fid'], array('absolute' => TRUE)) .'"';
+      $output = str_replace($matches[0][$index], $private_link, $output);
+    }
+  }
+  else {
+    // No match, possible error
+    $output = '';
+  }
+  $conf['file_directory_path'] = $system_directory_path;
+  $conf['file_downloads'] = $system_file_downloads;
+
+  return $output;
+}
+
+
+/**
+* Implementation of hook_menu().
+*/
+function filefield_private_menu() {
+  $items = array();
+  $items['filefield-private/files/%node/%/%'] = array(
+    'title' => 'File download',
+    'page callback' => 'filefield_private_download',
+    'page arguments' => array(2, 3, 4),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+/**
+ * Implementation of hook_form_alter().
+ */
+function filefield_private_form_alter(&$form, $from_state, $form_id) {
+  switch ($form_id) {
+    case 'system_file_system_settings':
+      $form['filefield_private_directory_path'] = array(
+        '#type' => 'textfield',
+        '#title' => t('FileField private file system path'),
+        '#default_value' => variable_get('filefield_private_directory_path', file_directory_path()),
+        '#maxlength' => 255,
+        '#description' => t('A file system path where the files will be stored if the %type option above is selected for a FileField. This directory must exist and be writable by Drupal. The download method will be treated as private.',
+            array('%type' => t('Private downloads for user files?'))),
+        '#after_build' => array('system_check_directory'),
+      );
+      $form['buttons']['#weight'] = 10;
+
+  }
+}
+
+/**
+ * Implements hook_nodeapi().
+ */
+function filefield_private_nodeapi(&$node, $op, $a3 = NULL, $a4 = NULL) {
+  if ($op == 'view') {
+    $content_type = content_types($node->type);
+    $file_fields = filefield_private_file_fields();
+    foreach ($content_type['fields'] as $field) {
+      if (!empty($field['filefield_private_downloads']) && in_array($field['type'], $file_fields) && isset($node->content[$field['field_name']])
+        && is_array($node->content[$field['field_name']])) {
+        $instance = $node->content[$field['field_name']];
+        foreach ($node->content[$field['field_name']]['field']['items'] as $delta => $item) {
+          $item['#old-theme'] = $item['#theme'];
+          $item['#old-formatter'] = $item['#formatter'];
+          $item['#theme'] = 'filefield_private_file';
+          $item['#formatter'] = NULL;
+          $node->content[$field['field_name']]['field']['items'][$delta] = $item;
+        }
+      }
+    }
+  }
+  elseif ($op == 'insert' || $op == 'update') {
+    filefield_private_move_files($node);
+  }
+}
+
+/**
+ * Moves the file.
+ */
+function filefield_private_move_files(&$node) {
+  global $conf;
+  if (is_object($node)) {
+    $files = array();
+
+    $system_directory_path = $conf['file_directory_path'];
+    $real_system_directory_path = realpath($system_directory_path);
+
+    $filefield_private_directory_path = variable_get('filefield_private_directory_path', $system_directory_path);
+    $real_filefield_private_directory_path = realpath($filefield_private_directory_path);
+
+    $content_type = content_types($node->type);
+    $file_fields = filefield_private_file_fields();
+
+    foreach ($content_type['fields'] as $field) {
+      if (!empty($field['filefield_private_downloads']) && in_array($field['type'], $file_fields) && isset($node->$field['field_name']) && is_array($node->$field['field_name'])) {
+        foreach ($node->$field['field_name'] as $file) {
+          if (file_exists($file['filepath'])) {
+            $file['realpath'] = realpath($file['filepath']);
+            // If within the private path, ignore the file
+            if (strpos($file['realpath'], $real_filefield_private_directory_path) !== 0) {
+              $file['relative_path'] = ltrim(substr($file['realpath'], strlen($real_system_directory_path)), '\\/');
+              $file['dest'] = rtrim($filefield_private_directory_path, '\\/') .'/'. $file['relative_path'];
+              $files[$file['fid']] = $file;
+            }
+          }
+        }
+      }
+    }
+    foreach ($files as $file) {
+      $conf['file_directory_path'] = $filefield_private_directory_path;
+      $src = $file['filepath'];
+      if (($last = strpos($file['relative_path'], '/')) !== NULL) {
+        $dest = $filefield_private_directory_path . '/' . substr($file['relative_path'], 0, $last) . '/';
+        file_check_directory($dest, TRUE);
+      }
+      else {
+        $dest = 0;
+      }
+      if (file_move($src, $dest, FILE_EXISTS_RENAME)) {
+        // update db
+        db_query("UPDATE {files} SET filepath = '%s' WHERE filepath = '%s'", $src, $file['filepath']);
+      }
+      else {
+        // Error - TODO Find a better way
+        $delete = file_delete($file['filepath']);
+        db_query("DELETE FROM {files} WHERE filepath = '%s'", $file['filepath']);
+        if ($delete) {
+          drupal_set_message(t('Error moving the file from the public to private file directories. The file was deleted as a pre-caution from the public error. The node file details should be updated by removing the file reference.'), 'error');
+        }
+        else {
+          drupal_set_message(t('Error moving the file from the public to private file directories. This file could not be deleted from the public file area and should be removed manually. Please report this to your system administrator. Filepath: "%filepath".', array('%filepath' => $file['filepath'])), 'error');
+        }
+      }
+      $conf['file_directory_path'] = $system_directory_path;
+    }
+  }
+}
+
+/**
+ * Call modules that implement hook_file_download() to find out if a file is
+ * accessible and what headers it should be transferred with. If a module
+ * returns -1 drupal_access_denied() will be returned. If one or more modules
+ * returned headers the download will start with the returned headers. If no
+ * modules respond drupal_not_found() will be returned.
+ */
+function filefield_private_download($node, $field_name, $fid) {
+  global $conf;
+  if (!node_access('view', $node)) {
+    return drupal_access_denied();
+  }
+  $field = content_fields($field_name, $node->type);
+
+  $filepath = '';
+  $content_disposition = empty($field['filefield_private_content_disposition'])
+       ? 'attachment' : $field['filefield_private_content_disposition'];
+
+  if (!empty($node->$field_name)) {
+    foreach ($node->$field_name as $file) {
+      if ($file['fid'] == $fid && file_exists($file['filepath'])) {
+        $filepath = $file['filepath'];
+        break;
+      }
+    }
+  }
+  if (file_exists($filepath)) {
+    $filefield_private_directory_path = variable_get('filefield_private_directory_path', $system_directory_path);
+    $system_directory_path = $conf['file_directory_path'];
+    $conf['file_directory_path'] = $filefield_private_directory_path;
+
+    $headers = module_invoke_all('file_download', $filepath);
+    $headers = array_merge($headers, module_invoke_all('file_private_download', $filepath, $content_disposition));
+    // FileField returns -1 when the file cannot be downloaded
+    if (in_array(-1, $headers)) {
+      $conf['file_directory_path'] = $system_directory_path;
+      return drupal_access_denied();
+    }
+    if (count($headers)) {
+      file_transfer($filepath, $headers);
+    }
+  }
+  $conf['file_directory_path'] = $system_directory_path;
+  return drupal_not_found();
+}
+
+function filefield_private_file_private_download ($filepath, $content_disposition) {
+  if (in_array($content_disposition, array('inline', 'attachment'))) {
+    return array(
+      'Content-Disposition: '. $content_disposition .'; filename="'. basename($filepath) .'"'
+    );
+  }
+}

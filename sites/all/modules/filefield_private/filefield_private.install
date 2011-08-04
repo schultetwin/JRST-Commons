@@ -1,0 +1,15 @@
+<?php
+//$Id: filefield_private.install,v 1.1 2010/01/30 04:12:11 aland Exp $
+
+/**
+ * @file
+ */
+
+/**
+ * Implementation of hook_uninstall().
+ */
+function filefield_private_uninstall() {
+  // Delete variables.
+  variable_del('filefield_private_directory_path');
+}
+
